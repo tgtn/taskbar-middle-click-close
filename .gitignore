@@ -1,0 +1,23 @@
+﻿# Build results
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio
+.vs/
+*.sln
+
+# Rider
+.idea/
+
+# Others
+*.log
+*.tmp
