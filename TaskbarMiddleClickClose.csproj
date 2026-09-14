@@ -2,9 +2,12 @@
 
     <PropertyGroup>
         <OutputType>WinExe</OutputType>
-        <TargetFramework>net9.0-windows</TargetFramework>
+        <TargetFramework>net10.0-windows</TargetFramework>
         <Nullable>enable</Nullable>
+
         <UseWindowsForms>true</UseWindowsForms>
+        <UseWPF>true</UseWPF>
+
         <ImplicitUsings>enable</ImplicitUsings>
         <ApplicationIcon>app-icon.ico</ApplicationIcon>
     </PropertyGroup>
