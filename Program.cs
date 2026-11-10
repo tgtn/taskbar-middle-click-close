@@ -2,7 +2,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows;
 using System.Windows.Automation;
+using Application = System.Windows.Forms.Application;
+using MessageBox = System.Windows.Forms.MessageBox;
+using Point = System.Windows.Point;
 
 namespace TaskbarMiddleClickClose;
 
@@ -13,64 +17,141 @@ internal static class Program
     private const uint WmClose = 0x0010;
 
     private static readonly LowLevelMouseProc Proc = HookCallback;
+
     private static IntPtr _hookId;
+    private static bool _hookRemoved;
+
+    [DllImport(
+        "user32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern IntPtr FindWindow(
+        string? lpClassName,
+        string? lpWindowName);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr WindowFromPoint(Point point);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(
+        EnumWindowsProc lpEnumFunc,
+        IntPtr lParam);
 
     [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(
+        IntPtr hWnd);
 
     [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(
+        IntPtr hWnd,
+        out NativeRect lpRect);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport(
+        "user32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern int GetWindowText(
+        IntPtr hWnd,
+        StringBuilder lpString,
+        int nMaxCount);
+
+    [DllImport(
+        "user32.dll",
+        SetLastError = true)]
+    private static extern int GetWindowTextLength(
+        IntPtr hWnd);
+
+    [DllImport(
+        "user32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern int GetClassName(
+        IntPtr hWnd,
+        StringBuilder lpClassName,
+        int nMaxCount);
+
+    [DllImport(
+        "user32.dll",
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        IntPtr lParam);
+
+    [DllImport(
+        "user32.dll",
+        SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(
+        int idHook,
+        LowLevelMouseProc lpfn,
+        IntPtr hMod,
+        uint dwThreadId);
+
+    [DllImport(
+        "user32.dll",
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(
+        IntPtr hhk);
 
     [DllImport("user32.dll")]
-    private static extern int GetWindowTextLength(IntPtr hWnd);
+    private static extern IntPtr CallNextHookEx(
+        IntPtr hhk,
+        int nCode,
+        IntPtr wParam,
+        IntPtr lParam);
 
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(
+        string? lpModuleName);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    private delegate IntPtr LowLevelMouseProc(
+        int nCode,
+        IntPtr wParam,
+        IntPtr lParam);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetParent(IntPtr hWnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern IntPtr GetModuleHandle(string? lpModuleName);
-
-    private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+    private delegate bool EnumWindowsProc(
+        IntPtr hWnd,
+        IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct Point
+    private struct NativePoint
     {
         public int X;
         public int Y;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct MsllHookStruct
+    private struct NativeRect
     {
-        public Point pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public IntPtr dwExtraInfo;
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+
+        public readonly bool Contains(NativePoint point)
+        {
+            return point.X >= Left &&
+                   point.X < Right &&
+                   point.Y >= Top &&
+                   point.Y < Bottom;
+        }
     }
 
-    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MsllHookStruct
+    {
+        public NativePoint Point;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public IntPtr ExtraInfo;
+    }
 
     [STAThread]
     private static void Main()
@@ -80,39 +161,67 @@ internal static class Program
 
         _hookId = SetHook(Proc);
 
-        // Create system tray icon
-        var trayIcon = new NotifyIcon();
-        trayIcon.Text = "Taskbar Middle-Click Close";
+        if (_hookId == IntPtr.Zero)
+        {
+            var error = Marshal.GetLastWin32Error();
 
-        // Load icon from embedded resources
-        try
-        {
-            var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app-icon.ico");
-            trayIcon.Icon = File.Exists(iconPath) ? new Icon(iconPath) : SystemIcons.Application;
+            MessageBox.Show(
+                $"The mouse hook could not be installed.\n\n" +
+                $"Windows error: {error}",
+                "Taskbar Middle-Click Close",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+
+            return;
         }
-        catch
+
+        using var trayIcon = CreateTrayIcon();
+
+        Application.ApplicationExit += (_, _) =>
         {
-            trayIcon.Icon = SystemIcons.Application;
-        }
+            RemoveMouseHook();
+            trayIcon.Visible = false;
+        };
 
         trayIcon.Visible = true;
 
-        // Create context menu
+        try
+        {
+            Application.Run();
+        }
+        finally
+        {
+            trayIcon.Visible = false;
+            RemoveMouseHook();
+        }
+    }
+
+    private static NotifyIcon CreateTrayIcon()
+    {
+        var trayIcon = new NotifyIcon
+        {
+            Text = "Taskbar Middle-Click Close",
+            Icon = LoadApplicationIcon()
+        };
+
         var contextMenu = new ContextMenuStrip();
 
         var aboutItem = new ToolStripMenuItem("About");
+
         aboutItem.Click += (_, _) =>
         {
             MessageBox.Show(
                 "Taskbar Middle-Click Close\n\n" +
-                "Middle-click any taskbar button to close that application.\n\n" +
-                "Running in system tray.",
+                "Middle-click a running application's taskbar " +
+                "button to close that application's window.\n\n" +
+                "Running in the system tray.",
                 "About",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         };
 
         var exitItem = new ToolStripMenuItem("Exit");
+
         exitItem.Click += (_, _) =>
         {
             trayIcon.Visible = false;
@@ -125,16 +234,28 @@ internal static class Program
 
         trayIcon.ContextMenuStrip = contextMenu;
 
-        // Handle application exit
-        Application.ApplicationExit += (_, _) =>
+        return trayIcon;
+    }
+
+    private static Icon LoadApplicationIcon()
+    {
+        try
         {
-            UnhookWindowsHookEx(_hookId);
-            trayIcon.Dispose();
-        };
+            var iconPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Assets",
+                "app-icon.ico");
 
-        Application.Run();
+            if (File.Exists(iconPath))
+                return new Icon(iconPath);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"Could not load app-icon.ico: {ex}");
+        }
 
-        UnhookWindowsHookEx(_hookId);
+        return SystemIcons.Application;
     }
 
     private static IntPtr SetHook(
@@ -143,11 +264,25 @@ internal static class Program
         using var process = Process.GetCurrentProcess();
         using var module = process.MainModule;
 
+        var moduleHandle = GetModuleHandle(
+            module?.ModuleName);
+
         return SetWindowsHookEx(
             WhMouseLl,
             proc,
-            GetModuleHandle(module?.ModuleName),
+            moduleHandle,
             0);
+    }
+
+    private static void RemoveMouseHook()
+    {
+        if (_hookRemoved || _hookId == IntPtr.Zero)
+            return;
+
+        _hookRemoved = true;
+
+        UnhookWindowsHookEx(_hookId);
+        _hookId = IntPtr.Zero;
     }
 
     private static IntPtr HookCallback(
@@ -155,191 +290,116 @@ internal static class Program
         IntPtr wParam,
         IntPtr lParam)
     {
-        if (nCode >= 0 &&
-            wParam == WmMButtonDown)
+        if (nCode < 0 ||
+            wParam != new IntPtr(WmMButtonDown))
+        {
+            return CallNextHookEx(
+                _hookId,
+                nCode,
+                wParam,
+                lParam);
+        }
+
+        try
         {
             var hook =
                 Marshal.PtrToStructure<MsllHookStruct>(
                     lParam);
-            var hwnd = WindowFromPoint(hook.pt);
 
-            if (hwnd != IntPtr.Zero &&
-                IsTaskbarArea(hwnd))
+            if (!IsPointInsideTaskbar(hook.Point))
             {
-                QueueUiaWork(
-                    hook.pt.X,
-                    hook.pt.Y);
-
-                return 1; // only block taskbar middle-click
-            }
-        }
-
-        return CallNextHookEx(
-            _hookId,
-            nCode,
-            wParam,
-            lParam);
-    }
-
-    private static bool CloseTaskbarButtonAtPoint(
-        int x,
-        int y)
-    {
-        try
-        {
-            var button =
-                GetTaskbarButtonAtPoint(x, y);
-
-            if (button == null)
-                return false;
-
-            var taskbarTitle =
-                NormalizeTaskbarTitle(
-                    button.Current.Name);
-
-            if (string.IsNullOrWhiteSpace(taskbarTitle))
-                return false;
-
-            Console.WriteLine(
-                $"Clicked: {taskbarTitle}");
-
-            var result =
-                FindBestMatchingWindow(
-                    taskbarTitle);
-
-            Console.WriteLine(
-                $"Best score: {result.Score}");
-
-            if (result.Score < 25)
-            {
-                Console.WriteLine(
-                    "Match score too low. Not closing anything.");
-
-                return false;
+                return CallNextHookEx(
+                    _hookId,
+                    nCode,
+                    wParam,
+                    lParam);
             }
 
-            SendMessage(
-                result.Hwnd,
-                WmClose,
-                IntPtr.Zero,
-                IntPtr.Zero);
+            QueueUiaWork(
+                hook.Point.X,
+                hook.Point.Y);
 
-            return true;
+            // Suppress the normal Windows taskbar middle-click action,
+            // which would otherwise open another application instance.
+            return new IntPtr(1);
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex);
-            return false;
+            Debug.WriteLine(
+                $"Mouse hook error: {ex}");
+
+            return CallNextHookEx(
+                _hookId,
+                nCode,
+                wParam,
+                lParam);
         }
     }
 
-    private static AutomationElement?
-        GetTaskbarButtonAtPoint(
-            int x,
-            int y)
+    private static bool IsPointInsideTaskbar(
+        NativePoint point)
     {
-        var element =
-            AutomationElement.FromPoint(
-                new System.Windows.Point(x, y));
+        var primaryTaskbar = FindWindow(
+            "Shell_TrayWnd",
+            null);
 
-        while (element != null)
+        if (IsPointInsideWindow(
+                primaryTaskbar,
+                point))
         {
-            if (Equals(element.Current.ControlType, ControlType.Button))
-            {
-                return element;
-            }
-
-            element =
-                TreeWalker.RawViewWalker
-                    .GetParent(element);
-        }
-
-        return null;
-    }
-
-    private static string NormalizeTaskbarTitle(
-        string title)
-    {
-        if (string.IsNullOrWhiteSpace(title))
-            return string.Empty;
-
-        var idx =
-            title.LastIndexOf(
-                " - ",
-                StringComparison.Ordinal);
-
-        if (idx > 0)
-        {
-            var suffix = title[(idx + 3)..];
-
-            if (suffix.Contains(
-                    "running window",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                title = title[..idx];
-            }
-        }
-
-        return title.Trim();
-    }
-
-    private static (IntPtr Hwnd, int Score) FindBestMatchingWindow(
-        string taskbarTitle)
-    {
-        var bestHwnd = IntPtr.Zero;
-        var bestScore = 0;
-
-        EnumWindows((hwnd, _) =>
-        {
-            if (!IsWindowVisible(hwnd))
-                return true;
-
-            var len = GetWindowTextLength(hwnd);
-
-            if (len <= 0)
-                return true;
-
-            var sb = new StringBuilder(len + 1);
-
-            GetWindowText(hwnd, sb, sb.Capacity);
-
-            var title = sb.ToString();
-
-            var score = CalculateScore(
-                taskbarTitle,
-                title);
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestHwnd = hwnd;
-            }
-
             return true;
+        }
+
+        var insideSecondaryTaskbar = false;
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!string.Equals(
+                    GetWindowClassName(hWnd),
+                    "Shell_SecondaryTrayWnd",
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!IsPointInsideWindow(hWnd, point))
+                return true;
+
+            insideSecondaryTaskbar = true;
+
+            // Stop enumerating.
+            return false;
         }, IntPtr.Zero);
 
-        return (bestHwnd, bestScore);
+        return insideSecondaryTaskbar;
     }
 
-    private static int CalculateScore(
-        string taskbarTitle,
-        string windowTitle)
+    private static bool IsPointInsideWindow(
+        IntPtr hWnd,
+        NativePoint point)
     {
-        taskbarTitle = taskbarTitle.ToLowerInvariant();
-        windowTitle = windowTitle.ToLowerInvariant();
+        if (hWnd == IntPtr.Zero)
+            return false;
 
-        if (windowTitle == taskbarTitle)
-            return 1000;
+        return GetWindowRect(
+                   hWnd,
+                   out var rect) &&
+               rect.Contains(point);
+    }
 
-        if (windowTitle.Contains(taskbarTitle))
-            return 500 + taskbarTitle.Length;
+    private static string GetWindowClassName(
+        IntPtr hWnd)
+    {
+        var className = new StringBuilder(256);
 
-        if (taskbarTitle.Contains(windowTitle))
-            return 300 + windowTitle.Length;
+        var length = GetClassName(
+            hWnd,
+            className,
+            className.Capacity);
 
-        var words = taskbarTitle.Split(' ');
-
-        return (from word in words where word.Length >= 4 where windowTitle.Contains(word) select word.Length).Sum();
+        return length > 0
+            ? className.ToString()
+            : string.Empty;
     }
 
     private static void QueueUiaWork(
@@ -350,14 +410,23 @@ internal static class Program
         {
             try
             {
-                var closed = CloseTaskbarButtonAtPoint(x, y);
-                Console.WriteLine($"Windows closed: {closed}");
+                var closed = CloseTaskbarButtonAtPoint(
+                    x,
+                    y);
+
+                Debug.WriteLine(
+                    $"Window close requested: {closed}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex);
+                Debug.WriteLine(
+                    $"UI Automation worker error: {ex}");
             }
-        });
+        })
+        {
+            IsBackground = true,
+            Name = "TaskbarMiddleClickClose.UIA"
+        };
 
         thread.SetApartmentState(
             ApartmentState.STA);
@@ -365,31 +434,466 @@ internal static class Program
         thread.Start();
     }
 
-    private static bool IsTaskbarArea(IntPtr hwnd)
+    private static bool CloseTaskbarButtonAtPoint(
+        int x,
+        int y)
     {
-        var checkWindow = hwnd;
-
-        for (var i = 0; i < 10; i++)
+        try
         {
-            var className = new StringBuilder(256);
-            _ = GetClassName(checkWindow, className, className.Capacity);
-            var cls = className.ToString();
+            var button = GetTaskbarButtonAtPoint(
+                x,
+                y);
 
-            if (cls.Contains("Shell_TrayWnd") ||
-                cls.Contains("Shell_SecondaryTrayWnd") ||
-                cls.Contains("TaskList") ||
-                cls.Contains("MSTaskSwWClass") ||
-                cls.Contains("ReBarWindow32") ||
-                cls.Contains("ToolbarWindow32"))
+            if (button == null)
             {
-                return true;
+                Debug.WriteLine(
+                    "No taskbar application button found.");
+
+                return false;
             }
 
-            var parent = GetParent(checkWindow);
-            if (parent == IntPtr.Zero) break;
-            checkWindow = parent;
+            var elementName =
+                button.Current.Name ?? string.Empty;
+
+            var automationId =
+                button.Current.AutomationId ?? string.Empty;
+
+            var className =
+                button.Current.ClassName ?? string.Empty;
+
+            Debug.WriteLine(
+                $"UIA name: '{elementName}'");
+
+            Debug.WriteLine(
+                $"UIA automation ID: '{automationId}'");
+
+            Debug.WriteLine(
+                $"UIA class: '{className}'");
+
+            var taskbarTitle =
+                NormalizeTaskbarTitle(elementName);
+
+            if (string.IsNullOrWhiteSpace(taskbarTitle))
+            {
+                Debug.WriteLine(
+                    "The taskbar button has no usable name.");
+
+                return false;
+            }
+
+            Debug.WriteLine(
+                $"Normalized title: '{taskbarTitle}'");
+
+            var result =
+                FindBestMatchingWindow(taskbarTitle);
+
+            Debug.WriteLine(
+                $"Matched title: '{result.Title}'");
+
+            Debug.WriteLine(
+                $"Match score: {result.Score}");
+
+            if (result.Hwnd == IntPtr.Zero ||
+                result.Score < 25)
+            {
+                Debug.WriteLine(
+                    "No sufficiently reliable window match found.");
+
+                return false;
+            }
+
+            if (!PostMessage(
+                    result.Hwnd,
+                    WmClose,
+                    IntPtr.Zero,
+                    IntPtr.Zero))
+            {
+                Debug.WriteLine(
+                    $"PostMessage failed: " +
+                    $"{Marshal.GetLastWin32Error()}");
+
+                return false;
+            }
+
+            return true;
+        }
+        catch (ElementNotAvailableException ex)
+        {
+            Debug.WriteLine(
+                $"Taskbar element disappeared: {ex}");
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"Close operation failed: {ex}");
+
+            return false;
+        }
+    }
+
+    private static AutomationElement? GetTaskbarButtonAtPoint(
+        int x,
+        int y)
+    {
+        AutomationElement root;
+
+        try
+        {
+            root = AutomationElement.FromPoint(
+                new Point(x, y));
+        }
+        catch (ElementNotAvailableException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
         }
 
-        return false;
+        return FindTaskbarButtonAtPoint(
+            root,
+            x,
+            y,
+            0);
     }
+
+    private static AutomationElement? FindTaskbarButtonAtPoint(
+        AutomationElement parent,
+        int x,
+        int y,
+        int depth)
+    {
+        if (depth > 20)
+            return null;
+
+        AutomationElement? child;
+
+        try
+        {
+            child = TreeWalker.RawViewWalker.GetFirstChild(
+                parent);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+
+        while (child != null)
+        {
+            AutomationElement? nextSibling = null;
+
+            try
+            {
+                nextSibling =
+                    TreeWalker.RawViewWalker.GetNextSibling(
+                        child);
+
+                var rectangle =
+                    child.Current.BoundingRectangle;
+
+                if (!rectangle.IsEmpty &&
+                    IsPointInsideRectangle(
+                        rectangle,
+                        x,
+                        y))
+                {
+                    if (IsTaskbarApplicationButton(child))
+                        return child;
+
+                    var descendant =
+                        FindTaskbarButtonAtPoint(
+                            child,
+                            x,
+                            y,
+                            depth + 1);
+
+                    if (descendant != null)
+                        return descendant;
+                }
+            }
+            catch (ElementNotAvailableException)
+            {
+                // The taskbar tree can change while traversing it.
+            }
+            catch (InvalidOperationException)
+            {
+                // Ignore inaccessible UI Automation elements.
+            }
+
+            child = nextSibling;
+        }
+
+        return null;
+    }
+
+    private static bool IsPointInsideRectangle(
+        Rect rectangle,
+        int x,
+        int y)
+    {
+        return x >= rectangle.Left &&
+               x < rectangle.Right &&
+               y >= rectangle.Top &&
+               y < rectangle.Bottom;
+    }
+
+    private static bool IsTaskbarApplicationButton(
+        AutomationElement element)
+    {
+        try
+        {
+            var className =
+                element.Current.ClassName ?? string.Empty;
+
+            if (!className.Equals(
+                    "Taskbar.TaskListButtonAutomationPeer",
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var controlType =
+                element.Current.ControlType;
+
+            if (!Equals(controlType, ControlType.Button))
+                return false;
+
+            var automationId =
+                element.Current.AutomationId ??
+                string.Empty;
+
+            if (!automationId.StartsWith(
+                    "Window:",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var name =
+                element.Current.Name ??
+                string.Empty;
+
+            return !string.IsNullOrWhiteSpace(name);
+        }
+        catch (ElementNotAvailableException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeTaskbarTitle(
+        string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            return string.Empty;
+
+        title = title.Trim();
+
+        var separatorIndex = title.LastIndexOf(
+            " - ",
+            StringComparison.Ordinal);
+
+        if (separatorIndex > 0)
+        {
+            var suffix = title[(separatorIndex + 3)..];
+
+            if (suffix.Contains(
+                    "running window",
+                    StringComparison.OrdinalIgnoreCase) ||
+                suffix.Equals(
+                    "running",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                title = title[..separatorIndex];
+            }
+        }
+
+        string[] statusSuffixes =
+        [
+            " - active",
+            " - inactive",
+            " - attention",
+            " - flashing"
+        ];
+
+        foreach (var suffix in statusSuffixes)
+        {
+            if (!title.EndsWith(
+                    suffix,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            title = title[..^suffix.Length];
+            break;
+        }
+
+        return title.Trim();
+    }
+
+    private static WindowMatch FindBestMatchingWindow(
+        string taskbarTitle)
+    {
+        var bestMatch = new WindowMatch(
+            IntPtr.Zero,
+            string.Empty,
+            0);
+
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsWindowVisible(hWnd))
+                return true;
+
+            var title = GetNativeWindowTitle(hWnd);
+
+            if (string.IsNullOrWhiteSpace(title))
+                return true;
+
+            var score = CalculateScore(
+                taskbarTitle,
+                title);
+
+            if (score <= bestMatch.Score)
+                return true;
+
+            bestMatch = new WindowMatch(
+                hWnd,
+                title,
+                score);
+
+            return true;
+        }, IntPtr.Zero);
+
+        return bestMatch;
+    }
+
+    private static string GetNativeWindowTitle(
+        IntPtr hWnd)
+    {
+        var length = GetWindowTextLength(hWnd);
+
+        if (length <= 0)
+            return string.Empty;
+
+        var title = new StringBuilder(length + 1);
+
+        var copiedLength = GetWindowText(
+            hWnd,
+            title,
+            title.Capacity);
+
+        return copiedLength > 0
+            ? title.ToString()
+            : string.Empty;
+    }
+
+    private static int CalculateScore(
+        string taskbarTitle,
+        string windowTitle)
+    {
+        taskbarTitle = NormalizeForComparison(
+            taskbarTitle);
+
+        windowTitle = NormalizeForComparison(
+            windowTitle);
+
+        if (taskbarTitle.Length == 0 ||
+            windowTitle.Length == 0)
+        {
+            return 0;
+        }
+
+        if (windowTitle.Equals(
+                taskbarTitle,
+                StringComparison.Ordinal))
+        {
+            return 1000;
+        }
+
+        if (windowTitle.Contains(
+                taskbarTitle,
+                StringComparison.Ordinal))
+        {
+            return 500 + taskbarTitle.Length;
+        }
+
+        if (taskbarTitle.Contains(
+                windowTitle,
+                StringComparison.Ordinal))
+        {
+            return 300 + windowTitle.Length;
+        }
+
+        var words = taskbarTitle.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries |
+            StringSplitOptions.TrimEntries);
+
+        var score = 0;
+
+        foreach (var word in words)
+        {
+            if (word.Length < 4)
+                continue;
+
+            if (windowTitle.Contains(
+                    word,
+                    StringComparison.Ordinal))
+            {
+                score += word.Length;
+            }
+        }
+
+        return score;
+    }
+
+    private static string NormalizeForComparison(
+        string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var builder = new StringBuilder(
+            value.Length);
+
+        var previousWasSpace = false;
+
+        foreach (var character in value)
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                if (!previousWasSpace)
+                {
+                    builder.Append(' ');
+                    previousWasSpace = true;
+                }
+
+                continue;
+            }
+
+            builder.Append(
+                char.ToLowerInvariant(character));
+
+            previousWasSpace = false;
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private readonly record struct WindowMatch(
+        IntPtr Hwnd,
+        string Title,
+        int Score);
 }

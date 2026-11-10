@@ -9,11 +9,11 @@
         <UseWPF>true</UseWPF>
 
         <ImplicitUsings>enable</ImplicitUsings>
-        <ApplicationIcon>app-icon.ico</ApplicationIcon>
+        <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
     </PropertyGroup>
 
     <ItemGroup>
-        <Content Include="app-icon.ico">
+        <Content Include="Assets\app-icon.ico">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
     </ItemGroup>
